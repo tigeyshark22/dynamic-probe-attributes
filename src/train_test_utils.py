@@ -2,7 +2,7 @@ import torch
 from tqdm.auto import tqdm
 import time
 import numpy as np
-from src.losses import calc_prob_uncertinty
+from losses import calc_prob_uncertinty
 tic, toc = (time.time, time.time)
 
 
@@ -78,10 +78,9 @@ def train(probe, device, train_loader, optimizer, epoch, loss_func,
                      endtime-starttime,
                      train_acc))
         
-    preds = np.concatenate(preds)
-    truths = np.concatenate(truths)
-        
     if return_raw_outputs:
+        preds = np.concatenate(preds)
+        truths = np.concatenate(truths)
         return loss_avg, train_acc, preds, truths
     else:
         return loss_avg, train_acc
@@ -157,11 +156,10 @@ def test(probe, device, test_loader, loss_func, return_raw_outputs=False, verbos
               test_loss,
               test_acc))
         
-    preds = np.concatenate(preds)
-    truths = np.concatenate(truths)
-        
     # If return the raw outputs (before argmax) from the model
     if return_raw_outputs:
+        preds = np.concatenate(preds)
+        truths = np.concatenate(truths)
         return test_loss, test_acc, preds, truths
     else:
         return test_loss, test_acc

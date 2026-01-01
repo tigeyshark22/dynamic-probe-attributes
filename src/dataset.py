@@ -53,19 +53,28 @@ def split_conversation(text, user_identifier="HUMAN:", ai_identifier="ASSISTANT:
 
     current_user_message = ""
     current_assistant_message = ""
+    current_mode = None # "user" or "ai"
 
     for line in lines:
         line = line.lstrip(" ")
         if line.startswith(user_identifier):
+            current_mode = "user"
             if current_assistant_message:
                 assistant_messages.append(current_assistant_message.strip())
                 current_assistant_message = ""
             current_user_message += line.replace(user_identifier, "").strip() + " "
         elif line.startswith(ai_identifier):
+            current_mode = "ai"
             if current_user_message:
                 user_messages.append(current_user_message.strip())
                 current_user_message = ""
             current_assistant_message += line.replace(ai_identifier, "").strip() + " "
+        else:
+            # Handle multiline content
+            if current_mode == "user":
+                current_user_message += line.strip() + " "
+            elif current_mode == "ai":
+                current_assistant_message += line.strip() + " "
 
     if current_user_message:
         user_messages.append(current_user_message.strip())
@@ -114,15 +123,25 @@ def llama_v2_prompt(
 prompt_translator = {"_age_": "age",
                      "_gender_": "gender",
                      "_socioeco_": "socioeconomic status",
-                     "_education_": "education level",}
+                     "_education_": "education level",
+                     "_emotion_": "emotion",
+                     "_urgency_": "urgency"}
 
 
 class TextDataset(Dataset):
     def __init__(self, directory, tokenizer, model, label_idf="_age_", label_to_id=None, 
                  convert_to_llama2_format=False, user_identifier="HUMAN:", ai_identifier="ASSISTANT:", control_probe=False,
                  additional_datas=None, residual_stream=False, new_format=False, if_augmented=False, k=20,
-                 remove_last_ai_response=False, include_inst=False, one_hot=False, last_tok_pos=-1):
-        self.file_paths = [os.path.join(directory, f) for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f)) and f.endswith('.txt')]
+                 remove_last_ai_response=False, include_inst=False, one_hot=False, last_tok_pos=-1, use_current_suffix=False,
+                 label_from_folder=False):
+        
+        self.file_paths = []
+        # Recursive search using os.walk to support nested directories
+        for root, _, files in os.walk(directory):
+            for f in files:
+                if f.endswith('.txt'):
+                    self.file_paths.append(os.path.join(root, f))
+                    
         self.tokenizer = tokenizer
         self.labels = []
         self.acts = []
@@ -143,9 +162,15 @@ class TextDataset(Dataset):
         self.one_hot = one_hot
         self.last_tok_pos = last_tok_pos
         self.control_probe = control_probe
+        self.use_current_suffix = use_current_suffix
+        self.label_from_folder = label_from_folder
+        
         if self.additional_datas:
             for directory in self.additional_datas:
-                self.file_paths += [os.path.join(directory, f) for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f)) and f.endswith('.txt')]
+                 for root, _, files in os.walk(directory):
+                    for f in files:
+                        if f.endswith('.txt'):
+                            self.file_paths.append(os.path.join(root, f))
         self._load_in_data()
 
     def __len__(self):
@@ -156,9 +181,7 @@ class TextDataset(Dataset):
             file_path = self.file_paths[idx]
             corrupted_file_paths = []
 
-            int_idx = file_path[file_path.find("conversation_")+len("conversation_"):]
-            int_idx = int(int_idx[:int_idx.find("_")])
-            
+            # Determine label
             with open(file_path, 'r', encoding='utf-8') as f:
                 text = f.read()
                 
@@ -195,21 +218,46 @@ class TextDataset(Dataset):
                 text = text[text.find("<s>") + len("<s>"):]
             elif self.new_format:
                 text = text[text.find("<s>") + len("<s>"): text.rfind("[/INST]") - 1]
+
+            if self.label_from_folder:
+                # Infer label from parent directory name
+                label = os.path.basename(os.path.dirname(file_path))
+                # Normalize label (replace _ with space if needed, though folder names in static dataset seem to match labels e.g. 'neutral_emotion')
+                # Actually, CATEGORY_CONFIG usually expects specific strings. 
+                # generate_static_conversations.py uses "neutral_emotion", "happy", "sad".
+                # If label_to_id expects "neutral emotion" (space), we might need replacing.
+                # However, generate_static_conversations replaced " " with "_" for folder names.
+                # So we should likely revert "_" to " " if the label isn't found in id map.
+                if self.label_to_id and label not in self.label_to_id:
+                     label_space = label.replace("_", " ")
+                     if label_space in self.label_to_id:
+                         label = label_space
+            else:
+                # Infer label from filename
+                if self.label_idf in file_path:
+                    label = file_path[file_path.rfind(self.label_idf) + len(self.label_idf):file_path.rfind(".txt")]
+                else:
+                    # Fallback or error if not found?
+                    # For now continue, skipping this file if label not found
+                    continue
             
-            label = file_path[file_path.rfind(self.label_idf) + len(self.label_idf):file_path.rfind(".txt")]
-            
-            if label not in self.label_to_id.keys():
+            if self.label_to_id and label not in self.label_to_id:
+                # print(f"Skipping file {file_path}, label '{label}' not in map.")
                 continue
-                
+
             if self.label_to_id:
                 label = self.label_to_id[label]
+
                 
             if self.one_hot:
                 label = F.one_hot(torch.Tensor([label]).to(torch.long), len(self.label_to_id.keys()))
                 
             
             if not self.control_probe:
-                text += f" I think the {prompt_translator[self.label_idf]} of this user is"
+                if self.use_current_suffix:
+                    text += f" I think the current {prompt_translator[self.label_idf]} of this user is"
+                else:
+                    text += f" I think the {prompt_translator[self.label_idf]} of this user is"
             with torch.no_grad():
                 encoding = self.tokenizer(
                   text,
